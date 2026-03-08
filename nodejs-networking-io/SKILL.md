@@ -1,6 +1,6 @@
 ---
 name: nodejs-networking-io
-description: Node.js low-level I/O covering Buffers, binary data, encodings, file system operations, TCP/UDP networking, HTTP internals, DNS, and TLS encryption. Use when working with binary protocols, raw sockets, file descriptors, file locking, network servers, or TLS certificates.
+description: Node.js low-level I/O covering Buffers, binary data, encodings, file system operations, TCP/UDP networking, HTTP internals, DNS, and TLS encryption. Use when working with binary protocols, raw sockets, file descriptors, file locking, network servers, or TLS certificates. Based on Node.js Design Patterns (4th Ed.).
 ---
 
 # Node.js Networking & I/O

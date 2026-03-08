@@ -154,72 +154,126 @@ worker.once('online', () => {
 | Ready signal | Manual `process.send('ready')` | `'online'` event (automatic) |
 | Data transfer | Structured clone (serialized) | Structured clone + `ArrayBuffer` transfer + `SharedArrayBuffer` |
 
-## Generator-Based Cancelation Supervisor
+## AbortController Cancelation Patterns
 
-The `createAsyncCancelable` function wraps a generator to add transparent cancelation:
+### AbortController vs AbortSignal: Separation of Concerns
+
+```
+┌─────────────────────────────────┐    ┌──────────────────────────────────┐
+│       AbortController           │    │         AbortSignal              │
+│  (owned by the caller)          │    │  (passed to the async operation) │
+│                                 │    │                                  │
+│  ac.abort()       → triggers ───┼───►│  signal.aborted         (bool)  │
+│  ac.abort(reason) → with error  │    │  signal.throwIfAborted() (throw)│
+│                                 │    │  signal.addEventListener('abort')│
+└─────────────────────────────────┘    └──────────────────────────────────┘
+```
+
+### Full Cancelable Operation Example
 
 ```typescript
-class CancelError extends Error {
-  constructor() { super('Canceled') }
+async function fetchUserData(userId: string, signal: AbortSignal) {
+  signal.throwIfAborted()
+  const user = await fetchUser(userId)
+
+  signal.throwIfAborted()
+  const posts = await fetchPosts(user.id)
+
+  signal.throwIfAborted()
+  const comments = await fetchComments(posts[0].id)
+
+  return { user, posts, comments }
 }
 
-const createAsyncCancelable = <T>(generatorFn: (...args: unknown[]) => Generator) => {
-  return (...args: unknown[]) => {
-    const gen = generatorFn(...args)
-    let cancelRequested = false
+const ac = new AbortController()
+setTimeout(() => ac.abort(), 2000)
 
-    const cancel = () => { cancelRequested = true }
-
-    const promise = new Promise<T>((resolve, reject) => {
-      async function nextStep(prevResult: IteratorResult<unknown>) {
-        if (cancelRequested) return reject(new CancelError())
-        if (prevResult.done) return resolve(prevResult.value as T)
-
-        try {
-          nextStep(gen.next(await prevResult.value))
-        } catch (err) {
-          try {
-            nextStep(gen.throw(err))
-          } catch (err2) {
-            reject(err2)
-          }
-        }
-      }
-      nextStep({ value: undefined, done: false } as IteratorResult<unknown>)
-    })
-
-    return { promise, cancel }
+try {
+  const data = await fetchUserData('123', ac.signal)
+} catch (err) {
+  if (err instanceof Error && err.name === 'AbortError') {
+    console.log('Operation canceled')
+  } else {
+    throw err
   }
 }
 ```
 
-### How it works
-
-1. The generator function uses `yield` instead of `await`
-2. The supervisor iterates the generator, awaiting each yielded Promise
-3. Between each yield, it checks `cancelRequested`
-4. If canceled, it rejects with `CancelError` — no further yields are processed
-5. Errors from rejected Promises are thrown into the generator via `gen.throw()`
-
-### Usage
+### Reusable `callIfNotAborted` Wrapper
 
 ```typescript
-const fetchData = createAsyncCancelable(function* () {
-  const user = yield fetchUser(123)
-  const posts = yield fetchPosts(user.id)
-  const comments = yield fetchComments(posts[0].id)
+const callIfNotAborted = <T>(
+  signal: AbortSignal,
+  fn: (...args: unknown[]) => Promise<T>,
+  ...args: unknown[]
+): Promise<T> => {
+  signal.throwIfAborted()
+  return fn(...args)
+}
+
+async function fetchUserData(userId: string, signal: AbortSignal) {
+  const user = await callIfNotAborted(signal, fetchUser, userId)
+  const posts = await callIfNotAborted(signal, fetchPosts, user.id)
+  const comments = await callIfNotAborted(signal, fetchComments, posts[0].id)
   return { user, posts, comments }
-})
-
-const { promise, cancel } = fetchData()
-
-promise.catch(err => {
-  if (err instanceof CancelError) console.log('Operation canceled')
-})
-
-// Cancel after 2 seconds
-setTimeout(cancel, 2000)
+}
 ```
+
+### AbortSignal.timeout() — Auto-Aborting After a Duration
+
+Creates a signal that fires automatically. More reliable than a plain `timeout` option — aborts even when the server drip-feeds data at very slow rates.
+
+```typescript
+const response = await fetch(url, {
+  method: 'HEAD',
+  signal: AbortSignal.timeout(5000),
+})
+```
+
+### Composing Signals with AbortSignal.any()
+
+Combine multiple abort reasons (user cancel + timeout):
+
+```typescript
+const userAc = new AbortController()
+cancelButton.onclick = () => userAc.abort()
+
+const combinedSignal = AbortSignal.any([
+  userAc.signal,
+  AbortSignal.timeout(30_000),
+])
+
+await fetchUserData('123', combinedSignal)
+```
+
+### Event-Driven Cleanup with AbortSignal
+
+Register teardown logic that runs when cancelation fires:
+
+```typescript
+async function monitorSensor(signal: AbortSignal) {
+  const connection = await openSensorConnection()
+
+  signal.addEventListener('abort', () => {
+    connection.close()
+  }, { once: true })
+
+  while (!signal.aborted) {
+    const reading = await connection.nextReading()
+    processSensorData(reading)
+  }
+}
+```
+
+### Why AbortController Over Custom Solutions
+
+| Concern | Custom `cancelObj` | AbortController |
+|---|---|---|
+| Interoperability | Only works within your code | Standard API — works with `fetch`, streams, `node:test`, etc. |
+| Error semantics | Custom `CancelError` class | Standard `DOMException` with `name: 'AbortError'` |
+| Timeout support | Manual `setTimeout` + flag | `AbortSignal.timeout(ms)` built-in |
+| Composability | Manual | `AbortSignal.any()` combines multiple signals |
+| Ecosystem adoption | None | `fetch`, `EventTarget`, `node:readline`, `node:stream`, etc. |
 
 ## Batching + Caching: Combined Pattern
 

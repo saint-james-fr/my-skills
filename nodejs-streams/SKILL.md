@@ -1,11 +1,11 @@
 ---
 name: nodejs-streams
-description: Reference guide for Node.js streams — Readable, Writable, Transform, Duplex, piping, backpressure, and advanced patterns. Use when working with streams, piping data, implementing custom streams, handling backpressure, processing large files, building data pipelines, or composing Transform streams.
+description: Reference guide for Node.js streams — Readable, Writable, Transform, Duplex, piping, backpressure, Web Streams interop, stream consumers, and advanced patterns. Use when working with streams, piping data, implementing custom streams, handling backpressure, processing large files, building data pipelines, composing Transform streams, or converting between Node.js and Web Streams.
 ---
 
 # Node.js Streams Reference
 
-Based on *Node.js Design Patterns* (3rd Ed.), Chapter 6.
+Based on *Node.js Design Patterns* (4th Ed.), Chapter 6.
 
 ## Why Streams
 
@@ -292,6 +292,80 @@ Same as parallel, but gate `done()` with a concurrency counter. When at limit, d
 | Writable | `drain`, `finish`, `error`, `close`, `pipe`, `unpipe` |
 | Transform | All of the above (both sides) |
 
+## Web Streams (WHATWG Streams Standard)
+
+The **WHATWG Streams Standard** provides `ReadableStream`, `WritableStream`, and `TransformStream` — a universal streaming API for browsers and Node.js.
+
+| Node.js Stream | Web Stream | Import from |
+|---|---|---|
+| `Readable` | `ReadableStream` | `node:stream/web` |
+| `Writable` | `WritableStream` | `node:stream/web` |
+| `Transform` | `TransformStream` | `node:stream/web` |
+
+**When to use which**:
+- **Browser code or `fetch` responses** → Web Streams (native to the platform)
+- **Node.js server code** → Node.js streams (deeper ecosystem adoption)
+- **Cross-platform libraries** → convert between them as needed
+
+### Converting Node.js Streams → Web Streams
+
+```typescript
+import { Readable, Writable, Transform } from 'node:stream'
+
+const webReadable = Readable.toWeb(nodeReadable)     // ReadableStream
+const webWritable = Writable.toWeb(nodeWritable)     // WritableStream
+const webTransform = Transform.toWeb(nodeTransform)  // TransformStream
+```
+
+### Converting Web Streams → Node.js Streams
+
+```typescript
+import { Readable, Writable, Transform } from 'node:stream'
+import { ReadableStream, WritableStream, TransformStream } from 'node:stream/web'
+
+const nodeReadable = Readable.fromWeb(webReadable)     // Readable
+const nodeWritable = Writable.fromWeb(webWritable)     // Writable
+const nodeTransform = Transform.fromWeb(webTransform)  // Transform
+```
+
+Conversions **wrap** the source (Adapter pattern) — they don't destroy it. Both the source and the converted stream emit the same chunks.
+
+## Stream Consumer Utilities (`node:stream/consumers`)
+
+When you need the **entire** stream content in memory (e.g., JSON parsing an HTTP response), use the built-in consumers instead of manual chunk accumulation.
+
+```typescript
+import consumers from 'node:stream/consumers'
+```
+
+| Method | Accumulates as |
+|---|---|
+| `consumers.json(stream)` | Parsed JSON object |
+| `consumers.text(stream)` | String |
+| `consumers.buffer(stream)` | Buffer |
+| `consumers.arrayBuffer(stream)` | ArrayBuffer |
+| `consumers.blob(stream)` | Blob |
+
+Each returns a Promise that resolves when the stream is fully consumed. Works with both Node.js `Readable` and Web `ReadableStream`.
+
+```typescript
+import { request } from 'node:http'
+import consumers from 'node:stream/consumers'
+
+const req = request('http://example.com/data.json', async (res) => {
+  const data = await consumers.json(res)
+  console.log(data)
+})
+req.end()
+```
+
+With `fetch`, the response object has built-in consumers (`.json()`, `.text()`, `.blob()`, `.arrayBuffer()`):
+
+```typescript
+const res = await fetch('http://example.com/data.json')
+const data = await res.json()
+```
+
 ## Decision Guide
 
 | Task | Approach |
@@ -304,6 +378,9 @@ Same as parallel, but gate `done()` with a concurrency counter. When at limit, d
 | Custom binary protocol | Duplex stream |
 | Data transformation | Transform stream |
 | HTTP request/response body | Already streams — pipe directly |
+| Consume full stream as JSON/text/buffer | `node:stream/consumers` |
+| Browser-compatible streaming | Web Streams (`ReadableStream`, etc.) |
+| Convert between Node.js and Web Streams | `.toWeb()` / `.fromWeb()` |
 
 ## Detailed Reference
 

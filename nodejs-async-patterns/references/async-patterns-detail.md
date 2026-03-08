@@ -164,10 +164,150 @@ for (const url of urls) {
 | `p-queue` | Priority queue with concurrency control |
 | `async` (npm) | Comprehensive callback-based control flow |
 
-## Infinite Recursive Promise Chains
+## Infinite Recursive Promise Chains (Memory Leak)
 
-When building recursive async algorithms (e.g., processing a queue item that spawns more items), deeply nested `.then()` chains can accumulate memory because each Promise holds a reference to the previous one. Solutions:
+A `return` inside `.then()` that calls itself creates an ever-growing chain of unsettled Promises — a memory leak per the Promises/A+ specification. No compliant implementation is immune.
 
-1. Use `async/await` with iterative loops instead of recursive `.then()` chains
-2. Use `setImmediate()` to break the chain and let the event loop unwind the stack
-3. Use a queue-based approach (TaskQueue) instead of recursion
+This affects any task without a predefined ending: live stream processing, IoT sensor monitoring, crypto market feeds, or any recursive functional pattern.
+
+### The Leak
+
+```typescript
+function leakingLoop(): Promise<void> {
+  return delay(1).then(() => {
+    console.log(`Tick ${Date.now()}`)
+    return leakingLoop() // returned Promise depends on the next, which depends on the next...
+  })
+}
+
+// Launch 1M instances → memory grows until crash
+for (let i = 0; i < 1e6; i++) {
+  leakingLoop()
+}
+```
+
+The Promise returned by `leakingLoop()` never resolves because its status depends on the next invocation, which depends on the next, ad infinitum.
+
+### Fix 1: Drop the `return` (breaks the chain)
+
+```typescript
+function nonLeakingLoop() {
+  delay(1).then(() => {
+    console.log(`Tick ${Date.now()}`)
+    nonLeakingLoop() // no return → no chain
+  })
+}
+```
+
+**Trade-off**: errors from deep recursion are lost — no link between promises. Mitigate with extra logging inside the function.
+
+### Fix 2: Promise constructor wrapper (preserves error propagation)
+
+```typescript
+function nonLeakingLoopWithErrors() {
+  return new Promise((_resolve, reject) => {
+    ;(function internalLoop() {
+      delay(1)
+        .then(() => {
+          console.log(`Tick ${Date.now()}`)
+          internalLoop()
+        })
+        .catch(reject) // errors at any depth surface to the caller
+    })()
+  })
+}
+```
+
+No chain between internal promises, but the outer Promise still rejects if any step fails.
+
+### Fix 3: `async`/`await` with `while` loop (recommended)
+
+```typescript
+async function nonLeakingLoopAsync() {
+  while (true) {
+    await delay(1)
+    console.log(`Tick ${Date.now()}`)
+  }
+}
+```
+
+Cleanest solution. Errors propagate naturally via `try/catch`.
+
+**The `async`/`await` recursive form still leaks:**
+
+```typescript
+// BAD: same chain leak
+async function leakingLoopAsync() {
+  await delay(1)
+  return leakingLoopAsync() // return creates the same infinite chain
+}
+```
+
+### Rule of Thumb
+
+For infinite async loops, use `while (true)` with `await`. Never `return` from a recursive async call.
+
+### Further Reading
+
+- Node.js issue: [nodejsdp.link/node-6673](https://nodejsdp.link/node-6673)
+- Promises/A+ spec issue: [nodejsdp.link/promisesaplus-memleak](https://nodejsdp.link/promisesaplus-memleak)
+
+## `Promise.withResolvers()` (ES2024)
+
+Returns `{ promise, resolve, reject }` — gives external control over a Promise's outcome. Equivalent to:
+
+```typescript
+function withResolvers<T>() {
+  let resolve: (value: T) => void
+  let reject: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve: resolve!, reject: reject! }
+}
+```
+
+### Use Case: Bridging Event-Driven Code
+
+```typescript
+const { promise, resolve } = Promise.withResolvers<Buffer>()
+
+socket.on('data', (chunk) => resolve(chunk))
+socket.on('error', (err) => reject(err))
+
+const firstChunk = await promise
+```
+
+### Use Case: Tracking Async Task Completion in Tests
+
+```typescript
+import { test } from 'node:test'
+import { strict as assert } from 'node:assert'
+
+test('All tasks complete and empty fires', async () => {
+  const queue = new TaskQueue(2)
+
+  const task1status = Promise.withResolvers<void>()
+  let task1Done = false
+  const task2status = Promise.withResolvers<void>()
+  let task2Done = false
+
+  queue.pushTask(async () => {
+    await setImmediate()
+    task1Done = true
+    task1status.resolve()
+  })
+  queue.pushTask(async () => {
+    await setImmediate()
+    task2Done = true
+    task2status.resolve()
+  })
+
+  await Promise.allSettled([task1status.promise, task2status.promise])
+  assert.ok(task1Done)
+  assert.ok(task2Done)
+})
+```
+
+`Promise.withResolvers()` is ideal in tests when you need to observe or control when specific async operations complete, without wrapping everything in callbacks.

@@ -1,11 +1,11 @@
 ---
 name: nodejs-advanced-recipes
-description: Production recipes for common Node.js async problems — async component initialization (pre-init queues), request batching and caching, cancelable async operations, and running CPU-bound tasks with setImmediate, child processes, or worker threads. Use when initializing async components (DB connections), caching/batching API calls, canceling long-running operations, or offloading heavy computation.
+description: Production recipes for common Node.js async problems — async component initialization (pre-init queues), request batching and caching, cancelable async operations with AbortController, and running CPU-bound tasks with setImmediate, child processes, or worker threads. Use when initializing async components (DB connections), caching/batching API calls, canceling long-running operations, or offloading heavy computation.
 ---
 
 # Node.js Advanced Recipes
 
-Based on *Node.js Design Patterns* (3rd Ed.), Chapter 11.
+Based on *Node.js Design Patterns* (4th Ed.), Chapter 11.
 
 ## Quick Decision Guide
 
@@ -158,9 +158,11 @@ export const totalSales = (product: string): Promise<number> => {
 
 **Problem**: A long-running async operation needs to be stopped (user navigated away, request timed out, result is no longer needed).
 
+JavaScript uses **cooperative multitasking** — the runtime won't stop an async function arbitrarily, only at `await` points where control returns to the event loop. Cancelation must be checked explicitly.
+
 ### Approach 1: Manual Cancel Check
 
-Check a cancel flag after each `await`:
+Check a cancel flag after each `await`. Simple but repetitive:
 
 ```typescript
 async function cancelable(cancelObj: { cancelRequested: boolean }) {
@@ -180,40 +182,93 @@ Wrap each async call with a function that checks for cancelation:
 const createCancelWrapper = () => {
   let cancelRequested = false
   const cancel = () => { cancelRequested = true }
-  const cancelWrapper = <T>(fn: (...args: unknown[]) => Promise<T>, ...args: unknown[]) => {
+  const callIfNotCanceled = <T>(fn: (...args: unknown[]) => Promise<T>, ...args: unknown[]) => {
     if (cancelRequested) return Promise.reject(new CancelError())
     return fn(...args)
   }
-  return { cancelWrapper, cancel }
+  return { callIfNotCanceled, cancel }
 }
 
-// Usage
-const { cancelWrapper, cancel } = createCancelWrapper()
+const { callIfNotCanceled, cancel } = createCancelWrapper()
 async function myOperation() {
-  const a = await cancelWrapper(asyncRoutine, 'A')
-  const b = await cancelWrapper(asyncRoutine, 'B')
+  const a = await callIfNotCanceled(asyncRoutine, 'A')
+  const b = await callIfNotCanceled(asyncRoutine, 'B')
 }
 setTimeout(cancel, 100)
 ```
 
-### Approach 3: Generator-Based (Transparent Cancelation)
+### Approach 3: AbortController (Recommended — Standard API)
 
-Use a generator where `yield` replaces `await`. A supervisor checks for cancelation between each yield:
+`AbortController` is the **standard** cancelation mechanism in JavaScript (browsers + Node.js). Prefer this over custom solutions for interoperability.
+
+**Key concepts**:
+- `AbortController` — owned by whoever initiates the operation. Triggers cancelation via `abort()`.
+- `AbortSignal` — passed to async operations. Reacts to cancelation.
 
 ```typescript
-const cancelable = createAsyncCancelable(function* () {
-  const resA = yield asyncRoutine('A')
-  const resB = yield asyncRoutine('B')
-  const resC = yield asyncRoutine('C')
-})
+async function cancelable(abortSignal: AbortSignal) {
+  abortSignal.throwIfAborted()
+  const resA = await asyncRoutine('A')
+  abortSignal.throwIfAborted()
+  const resB = await asyncRoutine('B')
+  abortSignal.throwIfAborted()
+  const resC = await asyncRoutine('C')
+}
 
-const { promise, cancel } = cancelable()
-setTimeout(cancel, 100)
+const ac = new AbortController()
+setTimeout(() => ac.abort(), 100)
+
+try {
+  await cancelable(ac.signal)
+} catch (err) {
+  if (err instanceof Error && err.name === 'AbortError') {
+    console.log('Function canceled')
+  } else {
+    throw err
+  }
+}
 ```
 
-No cancelation logic visible in the business code at all.
+**AbortSignal API**:
 
-**In production**: Use the `caf` package (Cancelable Async Flows) — implements this pattern with edge cases handled.
+| Method / Property | Behavior |
+|---|---|
+| `signal.throwIfAborted()` | Throws immediately if aborted (DOMException with `name: 'AbortError'`) |
+| `signal.aborted` | Boolean — `true` if aborted |
+| `signal.addEventListener('abort', fn, { once: true })` | Event-driven reaction to cancelation |
+| `AbortSignal.timeout(ms)` | Static factory — creates a signal that auto-aborts after `ms` milliseconds |
+
+### AbortSignal.timeout() for Request Timeouts
+
+```typescript
+const response = await fetch(url, {
+  method: 'HEAD',
+  signal: AbortSignal.timeout(5000),
+})
+```
+
+`AbortSignal.timeout()` is more reliable than a plain `timeout` option — it aborts even if the server sends data at extremely slow rates (common bot-prevention technique).
+
+### Reducing Boilerplate with a Wrapper
+
+Combine `AbortSignal` with a wrapper for cleaner code:
+
+```typescript
+const callIfNotAborted = <T>(
+  signal: AbortSignal,
+  fn: (...args: unknown[]) => Promise<T>,
+  ...args: unknown[]
+): Promise<T> => {
+  signal.throwIfAborted()
+  return fn(...args)
+}
+
+async function cancelable(signal: AbortSignal) {
+  const resA = await callIfNotAborted(signal, asyncRoutine, 'A')
+  const resB = await callIfNotAborted(signal, asyncRoutine, 'B')
+  const resC = await callIfNotAborted(signal, asyncRoutine, 'C')
+}
+```
 
 ---
 
@@ -297,4 +352,4 @@ Use a **ThreadPool** (identical logic to ProcessPool but uses `new Worker()` ins
 
 ## Detailed Reference
 
-For full implementations (ProcessPool, ThreadPool, generator-based cancelation supervisor), see [advanced-recipes-detail.md](references/advanced-recipes-detail.md).
+For full implementations (ProcessPool, ThreadPool, AbortController patterns), see [advanced-recipes-detail.md](references/advanced-recipes-detail.md).

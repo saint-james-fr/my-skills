@@ -5,7 +5,7 @@ description: Reference guide for Node.js asynchronous control flow patterns — 
 
 # Node.js Async Patterns Reference
 
-Based on _Node.js Design Patterns_ (3rd Ed.), Chapters 3-5.
+Based on _Node.js Design Patterns_ (4th Ed.), Chapters 3-5.
 
 ## The Golden Rule: Never Mix Sync and Async
 
@@ -194,12 +194,38 @@ const spider = (url: string) => {
 
 | Method                         | Behavior                                                               |
 | ------------------------------ | ---------------------------------------------------------------------- |
-| `Promise.all(iterable)`        | Fulfills when **all** fulfill; rejects on **first** rejection          |
+| `Promise.all(iterable)`        | Fulfills when **all** fulfill; rejects on **first** rejection. Other pending promises continue executing — they are **not** automatically canceled. |
 | `Promise.allSettled(iterable)` | Waits for all to settle; returns `{ status, value/reason }[]`          |
-| `Promise.race(iterable)`       | Settles with the **first** to settle                                   |
+| `Promise.race(iterable)`       | Settles with the **first** to settle. Useful for latency-based server selection. |
 | `Promise.any(iterable)`        | Fulfills with the **first** to fulfill; rejects only if **all** reject |
 | `Promise.resolve(val)`         | Wraps value/thenable in a Promise                                      |
 | `Promise.reject(err)`          | Creates a rejected Promise                                             |
+| `Promise.withResolvers()`      | Returns `{ promise, resolve, reject }` — control the promise externally (ES2024) |
+
+### `Promise.withResolvers()` (ES2024)
+
+Returns an object with a new Promise and its `resolve`/`reject` functions, letting you control the outcome externally. Useful when integrating with callback-based or event-driven code.
+
+```typescript
+const { promise, resolve, reject } = Promise.withResolvers<string>()
+
+someEmitter.on('data', (val) => resolve(val))
+someEmitter.on('error', (err) => reject(err))
+
+const result = await promise
+```
+
+Especially handy in tests to track when async work completes:
+
+```typescript
+const task1status = Promise.withResolvers<void>()
+const task = async () => {
+  await someWork()
+  task1status.resolve()
+}
+queue.pushTask(task)
+await task1status.promise
+```
 
 ### Promisification
 
@@ -264,6 +290,73 @@ await Promise.all(urls.map((url) => download(url)));
 const queue = new TaskQueue(4);
 await Promise.all(urls.map((url) => queue.runTask(() => download(url))));
 ```
+
+## Infinite Recursive Promise Chains (Memory Leak)
+
+A `return` inside a `.then()` that calls itself creates an ever-growing chain of unsettled promises — a memory leak per the Promises/A+ spec.
+
+```typescript
+// BAD: leaks memory — the returned promise never settles
+function leakingLoop(): Promise<void> {
+  return delay(1).then(() => {
+    console.log(`Tick ${Date.now()}`)
+    return leakingLoop() // chain grows forever
+  })
+}
+```
+
+### Fixes
+
+**1. Drop the `return`** — breaks the chain but loses error propagation:
+
+```typescript
+function nonLeakingLoop() {
+  delay(1).then(() => {
+    console.log(`Tick ${Date.now()}`)
+    nonLeakingLoop()
+  })
+}
+```
+
+**2. Wrap in a Promise constructor** — no chain, but errors still propagate:
+
+```typescript
+function nonLeakingLoopWithErrors() {
+  return new Promise((_resolve, reject) => {
+    ;(function internalLoop() {
+      delay(1)
+        .then(() => {
+          console.log(`Tick ${Date.now()}`)
+          internalLoop()
+        })
+        .catch(reject)
+    })()
+  })
+}
+```
+
+**3. `async`/`await` with `while` loop** (recommended) — clean, errors propagate:
+
+```typescript
+async function nonLeakingLoopAsync() {
+  while (true) {
+    await delay(1)
+    console.log(`Tick ${Date.now()}`)
+  }
+}
+```
+
+The `async`/`await` recursive form **still leaks**:
+
+```typescript
+// BAD: same leak as the promise chain version
+async function leakingLoopAsync() {
+  await delay(1)
+  return leakingLoopAsync()
+}
+```
+
+**Rule of thumb**: for infinite async loops, use `while (true)` with `await`, never recursive `return`.
 
 ## Decision Guide
 

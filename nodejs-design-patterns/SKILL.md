@@ -5,7 +5,7 @@ description: Reference guide for Node.js design patterns (creational, structural
 
 # Node.js Design Patterns Reference
 
-Based on _Node.js Design Patterns_ (3rd Ed.) by Casciaro & Mammino.
+Based on _Node.js Design Patterns_ (4th Ed.) by Casciaro & Mammino.
 
 In JavaScript, traditional GoF patterns are adapted to work with prototypal inheritance, closures, first-class functions, and dynamic typing. The implementation matters less than the problem each pattern solves.
 
